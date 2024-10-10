@@ -14,13 +14,16 @@ import "./interface/aave/pancakeswap/pancakeswapISwapRouter.sol";
 import "./interface/aave/camelot/camelotIQuoter.sol";
 import "./interface/aave/camelot/camelotISwapRouter.sol";
 import "./interface/aave/sushiswap/sushiswapIQuoter.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "hardhat/console.sol";
 
-contract myFlash {
+contract myFlash is Initializable {
     address private owner;
+    address private receiver;
     ILendingPoolAddressesProvider public addressesProvider; // Arbitrum mainnet addressProvider-0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb
     IPool public lendingPool;
     ISwapRouter public swapRouter;
+    ISwapRouter public sushiswapRouter;
     IQuoter public quoter;
     camelotIQuoter public camelotQuoter;
     pancakeswapIQuoterV2 public pancakeswapQuoter;
@@ -34,9 +37,12 @@ contract myFlash {
         require(msg.sender == owner, "Only owner can call this function");
         _;
     }
+    
 
-    constructor(address _owner) {
+
+    constructor(address _owner, address _receiver) {
         owner = _owner;
+        receiver = _receiver;
         addressesProvider = ILendingPoolAddressesProvider(
             0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb
         );
@@ -52,10 +58,15 @@ contract myFlash {
         pancakeswapQuoter = pancakeswapIQuoterV2(
             0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997
         );
-        pancakeSwapRouter=pancakeswapISwapRouter(0x1b81D678ffb9C0263b24A97847620C99d213eB14);
+        pancakeSwapRouter = pancakeswapISwapRouter(
+            0x1b81D678ffb9C0263b24A97847620C99d213eB14
+        );
         sushiswapQuoter = sushiswapIQuoterV2(
             0x0524E833cCD057e4d7A296e3aaAb9f7675964Ce1
         ); //https://docs.sushi.com/docs/Products/V3%20AMM/Periphery/Deployment%20Addresses
+        sushiswapRouter = ISwapRouter(
+            0x8A21F6768C1f8075791D08546Dadf6daA0bE820c
+        );
         _uniswapPool500 = IUniswapV3Pool(
             0xC6962004f452bE9203591991D15f6b388e09E8D0
         );
@@ -76,19 +87,26 @@ contract myFlash {
     function getEstimate(
         address token,
         uint256 amount,
-        address pairtoken
+        address pairToken
     ) public returns (uint256 amount0, uint256[2] memory dexNames) {
-        console.log("Estimate step");
-
-        (amount0, dexNames[0]) = _getMaxProfit(token, amount, pairtoken);
+        (amount0, dexNames[0]) = _getMaxProfit(token, amount, pairToken);
         console.log("first swap", amount0, dexNames[0]);
-        (amount0, dexNames[1]) = _getMaxProfit(pairtoken, amount0, token);
+        (amount0, dexNames[1]) = _getMaxProfit(pairToken, amount0, token);
         console.log("second swap", amount0, dexNames[1]);
-
-        // uint256 estimateResult = amount;
 
         // require(amount0>estimateResult,"no profit");
     }
+    function estimateProfit(
+    address token,
+    uint256 amount,
+    address pairToken
+) external onlyOwner returns (uint256, uint256[2] memory) {
+    console.log("here is estimateProfit");
+    (uint256 amount0, uint256[2] memory dexNames) = getEstimate(token, amount, pairToken);
+    console.log("getestimate is finished");
+    return (amount0, dexNames);
+}
+
 
     function callFlash(FlashParams calldata params) external onlyOwner {
         address token = params.token;
@@ -141,6 +159,9 @@ contract myFlash {
         uint256 remainingfunds = IERC20(asset).balanceOf(address(this));
         require(remainingfunds > repayAmount, "no profit");
         IERC20(asset).transfer(msg.sender, repayAmount);
+        remainingfunds = IERC20(asset).balanceOf(address(this));
+        IERC20(asset).transfer(receiver, remainingfunds);
+        return true;
     }
 
     // Define a struct to hold multiple return values to avoid too many local variables
@@ -320,29 +341,30 @@ contract myFlash {
         uint256 amountIn,
         address tokenIn,
         address tokenOut
-    ) internal returns (uint256) {
+    ) internal returns (uint256 amountOut) {
         console.log("swap started");
         if (dex == 0) {
-            uint256 firstSwap;
-            firstSwap = _swapOnUniswap3(amountIn, tokenIn, tokenOut, 500);
-            console.log("firstswap", firstSwap);
-            return firstSwap;
+            amountOut = _swapOnUniswap3(amountIn, tokenIn, tokenOut, 500);
         }
         if (dex == 1) {
-            uint256 secondSwap;
-            secondSwap = _swapOnUniswap3(amountIn, tokenIn, tokenOut, 3000);
-            console.log("secondSwap", secondSwap);
-            return secondSwap;
+            amountOut = _swapOnUniswap3(amountIn, tokenIn, tokenOut, 3000);
         }
         if (dex == 2) {
-            return _swapOnCamelot(amountIn, tokenIn, tokenOut);
+            amountOut = _swapOnCamelot(amountIn, tokenIn, tokenOut);
         }
-        if(dex==3){
-            return _swapOnPancakeSwap(amountIn,tokenIn,tokenOut,100);
+        if (dex == 3) {
+            amountOut = _swapOnPancakeSwap(amountIn, tokenIn, tokenOut, 100);
         }
-        if(dex==4){
-            return _swapOnPancakeSwap(amountIn,tokenIn,tokenOut,500);
+        if (dex == 4) {
+            amountOut = _swapOnPancakeSwap(amountIn, tokenIn, tokenOut, 500);
         }
+        if (dex == 5) {
+            amountOut = _swapOnSushi(amountIn, tokenIn, tokenOut, 500);
+        }
+        if (dex == 6) {
+            amountOut = _swapOnSushi(amountIn, tokenIn, tokenOut, 100);
+        }
+        return amountOut;
     }
     function _swapOnUniswap3(
         uint256 amountIn,
@@ -414,7 +436,7 @@ contract myFlash {
         address inputToken,
         address outputToken,
         uint24 poolFee
-    )internal returns(uint256 amountOut){
+    ) internal returns (uint256 amountOut) {
         // Ensure the user has approved enough tokens
         console.log("amountIn:", amountIn);
         uint256 currentBalance = IERC20(inputToken).balanceOf(address(this));
@@ -441,11 +463,49 @@ contract myFlash {
             })
         );
         console.log("pancake swap is completed");
+    }
+    function _swapOnSushi(
+        uint256 amountIn,
+        address inputToken,
+        address outputToken,
+        uint24 poolFee
+    ) internal returns (uint256 amountOut) {
+        // Ensure the user has approved enough tokens
+        console.log("amountIn:", amountIn);
+        uint256 currentBalance = IERC20(inputToken).balanceOf(address(this));
+        console.log("currentBalance", currentBalance);
+        require(currentBalance >= amountIn, "Allowance too low");
 
+        // Transfer tokens from msg.sender to this contract
+        // IERC20(inputToken).transferFrom(msg.sender, address(this), amountIn);
+
+        // Approve the swapRouter to spend the input token
+        IERC20(inputToken).approve(address(sushiswapRouter), amountIn);
+        console.log("sushiswap is here");
+        // Perform the swap
+        amountOut = sushiswapRouter.exactInputSingle(
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: inputToken,
+                tokenOut: outputToken,
+                fee: poolFee,
+                recipient: address(this),
+                deadline: block.timestamp + 1 hours,
+                amountIn: amountIn,
+                amountOutMinimum: 0,
+                sqrtPriceLimitX96: 0
+            })
+        );
+        console.log("sushi swap is completed");
     }
 
     // Add a getter for the owner
     function getOwner() external view returns (address) {
         return owner;
+    }
+    function transferOwnerShip(address newOwner) external onlyOwner {
+        owner = newOwner;
+    }
+    function transferReceiver(address newReceiver) external onlyOwner {
+        receiver = newReceiver;
     }
 }
